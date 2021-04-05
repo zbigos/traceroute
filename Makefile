@@ -1,8 +1,7 @@
 all:
-	g++ -g -fpermissive -c main.cpp
+	g++ -g -fpermissive -fsanitize=address -c main.cpp
 	g++ -g -c netutils.cpp
-	g++ -g -c test.cpp
-	g++ -g -c listener.cpp
+	g++ -g -c -fsanitize=address test.cpp
 
 
 test:
@@ -12,8 +11,9 @@ test:
 
 run:
 	make all
-	g++ -o main netutils.o main.o listener.o
+	g++ -fsanitize=address -o main netutils.o main.o
 	./main
+
 
 clean:
 	rm *.o

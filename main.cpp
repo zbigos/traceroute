@@ -1,26 +1,23 @@
-#include "netutils.hpp"
 #include "cstdio"
-#include <unistd.h>
-#include<netinet/ip.h>
-#include<netinet/ip_icmp.h>
-#include <random>
-#include <time.h>
-#include <signal.h>
-#include <sys/select.h>
-#include "listener.hpp"
-#include <chrono>
-#include <sys/time.h>
-#include <ctime>
-#define _GNU_SOURCE     /* To get defns of NI_MAXSERV and NI_MAXHOST */
+#include "netutils.hpp"
+#include <algorithm>
 #include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#include <chrono>
+#include <ctime>
 #include <ifaddrs.h>
+#include <linux/if_link.h>
+#include <netdb.h>
+#include <random>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
-#include <linux/if_link.h>
-
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 
 using std::vector;
 using std::pair;
@@ -31,54 +28,41 @@ using std::chrono::milliseconds;
 using std::chrono::system_clock;
 using std::chrono::duration_cast;
 
-void mk_icmpframe(TracertPacket *tpacket, int TTL, int32_t own_ip) {
-    tpacket->Version = 4;
-    tpacket->IHL = 5;
-    tpacket->DCSP = 0;
-    tpacket->ECN = 0;
-    tpacket->TotalLength = 60;
-
-    tpacket->Identification = rand()%8000;
-    tpacket->Flags = 0;
-    tpacket->FragmentOffset = 0;
-
-    tpacket->TTL = TTL;
-    tpacket->Protocol=1;
-
-    tpacket->SourceIP=own_ip;
-    tpacket->DestIP=0xdead; 
-
-    tpacket->Type = 8; //echo (request)
-    tpacket->Code = 0;
-
-    tpacket->ICMPIdentifier = 0x0dc5;
-    tpacket->ICMPSequenceNumber = 0x0022;
-}
-
 int64_t get_ms() {
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+bool inrange(int a, int b, int r) {
+    return (a >= b) && (a <= (b+r));
 }
 
 void worker(int32_t own_address) {
     sockaddr_in addr = GetRecipient("www.wikipedia.com");
     printf("tracing ");
     RenderHexIp(addr.sin_addr.s_addr);
-    printf("from ");
+    printf("\nfrom ");
     RenderHexIp(own_address);
-    
+    printf("\n");
+    uint32_t target_address = (uint32_t)addr.sin_addr.s_addr;
     int OutSockFd = GetSocket(IPPROTO_RAW);
     int InSockFd = GetSocket(IPPROTO_ICMP);
 
     for(int i = 1; i < 15; i++) {
-        TracertPacket *tpacket = (TracertPacket *)malloc(sizeof(TracertPacket));
-        mk_icmpframe(tpacket, i, own_address);
-
-        uint8_t *buf = TracertRenderer(tpacket, 80);
-        //DebugTracertRenderer(buf, 80);
-
+        printf("%d. ", i);
+        
+        uint16_t ICMP_ID =  rand()%0xAFFF + 0x2000;
+        uint16_t ICMP_SEQ = rand()%0xAFFF + 0x2000;
         int64_t now = get_ms();
-        for(int msgIt = 0; msgIt < 3; msgIt += 1)
+
+        for(int msgIt = 0; msgIt < 3; msgIt += 1) {
+            TracertPacket *tpacket = (TracertPacket *)malloc(sizeof(TracertPacket));
+            mk_icmpframe(tpacket, i, own_address, ICMP_ID + msgIt, ICMP_SEQ + msgIt);
+            uint8_t *buf = TracertRenderer(tpacket, 80);
             EmitPacket(buf, 60, OutSockFd, addr);
+
+            free(tpacket);
+            free(buf);
+        }
 
         struct timeval tv;
         fd_set readfds;
@@ -92,13 +76,13 @@ void worker(int32_t own_address) {
 		struct sockaddr_in 	sender;	
         socklen_t 			sender_len = sizeof(sender);
 
-        vector <pair <string, int64_t> > ICMPresponses;
+        vector <pair <uint32_t, int64_t> > ICMPresponses;
 
         while(true) {
             int retval = select(InSockFd + 1, &readfds, NULL, NULL, &tv);
             
             if(FD_ISSET(InSockFd, &readfds)) {
-                
+
                 ssize_t packet_len = recvfrom(
                     InSockFd, 
                     buffer, 
@@ -109,34 +93,76 @@ void worker(int32_t own_address) {
                 );
 
                 if (packet_len < 0) {
-    			    fprintf(stderr, "failed to read the recvsocket: %s\n", strerror(errno)); 
-	        	}
+    			    printf("[critical] failed to read the recvsocket: %s\n", strerror(errno)); 
+                    exit(1);
+                }
 
-                string sender_ip_str(20, ' ');
+                //==============================================
+        		socklen_t 			sender_len = sizeof(sender);
 
-                inet_ntop(AF_INET, &(sender.sin_addr), &sender_ip_str[0], sizeof(sender_ip_str));
-                //printf ("Received IP packet with ICMP content from: %s\n", sender_ip_str);
-                ICMPresponses.push_back(
-                    make_pair(
-                        sender_ip_str, 
-                        get_ms() - now
-                    )
-                );
+                struct ip* 			ip_header = (struct ip*) buffer;
+                ssize_t				ip_header_len = 4 * ip_header->ip_hl;
 
-                if (ICMPresponses.size() == 3)
-                    break;
+                char *ICMPbuf = buffer + ip_header_len;
+                uint16_t packet_id = ((uint8_t)ICMPbuf[32]) * 256 + (uint8_t)ICMPbuf[33];
+                uint16_t packet_seq = ((uint8_t)ICMPbuf[34]) * 256 + (uint8_t)ICMPbuf[35];
+                uint16_t alt_packet_id = ((uint8_t)ICMPbuf[4]) * 256 + (uint8_t)ICMPbuf[5];
+                uint16_t alt_packet_seq = ((uint8_t)ICMPbuf[6]) * 256 + (uint8_t)ICMPbuf[7];
+
+                uint32_t response_addr = __bswap_32((uint32_t)(sender.sin_addr.s_addr));
+                if ((inrange(packet_id, ICMP_ID, 3) && inrange(packet_seq, ICMP_SEQ, 3)) || \
+                ((target_address == response_addr) && inrange(alt_packet_id, ICMP_ID, 3) && inrange(alt_packet_seq, ICMP_SEQ, 3))) {
+                    ICMPresponses.push_back(
+                        make_pair(
+                            response_addr, 
+                            get_ms() - now
+                        )
+                    );
+                }
+
+                if (ICMPresponses.size() == 3) break;
             } else {
-                if (ICMPresponses.size() < 3) {
-                    ICMPresponses.push_back(make_pair("***", 0));
-                } else break;
+                if (ICMPresponses.size() < 3)
+                    ICMPresponses.push_back(make_pair(0, -1));
+                else break;
             }
         }
 
-        for(int i = 0; i < ICMPresponses.size(); i++) {
-            std::cout << "(" <<  ICMPresponses[i].second << ")" << ICMPresponses[i].first << " ";
-        }
+        int64_t timesum = 0;
+        for(int i = 0 ; i < 3; i++)
+            timesum += ICMPresponses[i].second;
 
-        printf("\n");
+        if(ICMPresponses[0].first == ICMPresponses[1].first &&
+           ICMPresponses[1].first == ICMPresponses[2].first) {
+            if(ICMPresponses[0].first == 0) {
+                printf("*\n");
+            } else {
+                RenderHexIp(ICMPresponses[0].first);
+                printf(" %d.%dms\n", timesum/3000, timesum%3000);
+            }
+           }
+        else {
+            uint32_t tadr[3];
+            for(int i = 0; i < 3; i++)
+                tadr[i] = ICMPresponses[i].first;
+
+            std::sort(tadr, tadr+3);
+            if(tadr[0] != 0) {
+                RenderHexIp(tadr[0]);
+                printf("    ");
+            }
+
+            if(tadr[0] != tadr[1] && tadr[1] != 0) {RenderHexIp(tadr[1]); printf("    ");}
+            if(tadr[1] != tadr[2] && tadr[2] != 0) {RenderHexIp(tadr[2]); printf("    ");}
+            
+            if(tadr[0] != 0 && tadr[1] != 0 && tadr[2] != 0)
+                printf(" %d.%dms\n", timesum/3000, timesum%3000);
+            else
+                printf("???\n");
+        }
+        // Reached target machine. Stop.
+        if(ICMPresponses[0].first == target_address)
+            break;
     }
 }
 
@@ -185,17 +211,12 @@ int main() {
         struct in_addr addr;        
         inet_aton(ip_addresses[i], &addr);
 
-        u_char b1, b2, b3, b4;
+        u_char b1, b2;
         b1 = addr.s_addr & 0xff;
         b2 = (addr.s_addr >> 8) & 0xff;
-        b3 = (addr.s_addr >> 16) & 0xff;
-        b4 = (addr.s_addr >> 24) & 0xff;
-        
-        if(b1 == 192 && b2 == 168)
+        if(b1 == 192 && b2 == 168) 
             vaddrs.push_back(addr.s_addr);
         
-        //printf("moje - %d.%d.%d.%d\n", b1, b2, b3, b4);
-
         free(ip_addresses[i]);
     }
 

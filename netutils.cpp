@@ -1,13 +1,13 @@
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include "netutils.hpp"
 #include <arpa/inet.h>
+#include <byteswap.h>
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <netdb.h>
-#include <cstring>
-#include <cerrno>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h> 
-#include "netutils.hpp"
-#include <byteswap.h>
 
 uint16_t calculate_icmp_checksum(uint8_t *buf, size_t bytecount) {
     uint32_t acc = 0;
@@ -132,7 +132,7 @@ void RenderHexIp(uint64_t ip) {
     b = (ip >> 8) & 0xff;
     c = (ip >> 16) & 0xff;
     d = (ip >> 24) & 0xff;
-    printf("%d.%d.%d.%d\n", d, c, b, a);
+    printf("%d.%d.%d.%d", d, c, b, a);
 }
 
 sockaddr_in GetRecipient(char *hosthint) {
@@ -156,6 +156,7 @@ sockaddr_in GetRecipient(char *hosthint) {
     if (s != 0) {
         sockaddr_in t;
         memset(&t, 0, sizeof(t));
+        freeaddrinfo(result);
         return t;
     } else {
         for(addrptr = result; addrptr != NULL; addrptr = addrptr->ai_next) {
@@ -166,6 +167,7 @@ sockaddr_in GetRecipient(char *hosthint) {
                 //RenderHexIp(char2uint(addrptr->ai_addr->sa_data));
                 sockaddr_in tmp;
                 tmp.sin_addr.s_addr = char2uint(addrptr->ai_addr->sa_data);
+                freeaddrinfo(result);
                 return tmp;
             }
             
@@ -185,4 +187,28 @@ void EmitPacket(uint8_t *buf, uint16_t bufsize, int sockfd, sockaddr_in recipien
         printf("write status %s %d\n", std::strerror(errno), errno);
         exit(1);
     }
+}
+
+void mk_icmpframe(TracertPacket *tpacket, int TTL, int32_t own_ip, uint16_t ICMP_ID, uint16_t ICMP_SEQ) {
+    tpacket->Version = 4;
+    tpacket->IHL = 5;
+    tpacket->DCSP = 0;
+    tpacket->ECN = 0;
+    tpacket->TotalLength = 60;
+
+    tpacket->Identification = rand()%8000;
+    tpacket->Flags = 0;
+    tpacket->FragmentOffset = 0;
+
+    tpacket->TTL = TTL;
+    tpacket->Protocol=1;
+
+    tpacket->SourceIP=own_ip;
+    tpacket->DestIP=0xdead; 
+
+    tpacket->Type = 8; //echo (request)
+    tpacket->Code = 0;
+
+    tpacket->ICMPIdentifier = ICMP_ID;
+    tpacket->ICMPSequenceNumber = ICMP_SEQ;
 }

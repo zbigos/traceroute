@@ -42,3 +42,4 @@ int GetSocket(int proto);
 void EmitPacket(uint8_t *buf, uint16_t bufsize, int sockfd, sockaddr_in recipient);
 uint8_t *TracertRenderer(TracertPacket *src, int payloadsize);
 void DebugTracertRenderer(uint8_t *buf, int packetsize);
+void mk_icmpframe(TracertPacket *tpacket, int TTL, int32_t own_ip, uint16_t ICMP_ID, uint16_t ICMP_SEQ);
