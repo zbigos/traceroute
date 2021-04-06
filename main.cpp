@@ -1,3 +1,5 @@
+/* Zbigniew Drozd 310555 */
+
 #include "cstdio"
 #include "netutils.hpp"
 #include <algorithm>
@@ -36,29 +38,28 @@ bool inrange(int a, int b, int r) {
     return (a >= b) && (a <= (b+r));
 }
 
-void worker(int32_t own_address) {
-    sockaddr_in addr = GetRecipient("www.wikipedia.com");
+void worker(int32_t own_address, uint32_t target_address) {
     printf("tracing ");
-    RenderHexIp(addr.sin_addr.s_addr);
+    RenderHexIp(target_address);
     printf("\nfrom ");
     RenderHexIp(own_address);
-    printf("\n");
-    uint32_t target_address = (uint32_t)addr.sin_addr.s_addr;
+    printf("\n============================================\n");
+
     int OutSockFd = GetSocket(IPPROTO_RAW);
     int InSockFd = GetSocket(IPPROTO_ICMP);
 
-    for(int i = 1; i < 15; i++) {
+    for(int i = 1; i < 32; i++) {
         printf("%d. ", i);
-        
+
         uint16_t ICMP_ID =  rand()%0xAFFF + 0x2000;
         uint16_t ICMP_SEQ = rand()%0xAFFF + 0x2000;
         int64_t now = get_ms();
 
         for(int msgIt = 0; msgIt < 3; msgIt += 1) {
             TracertPacket *tpacket = (TracertPacket *)malloc(sizeof(TracertPacket));
-            mk_icmpframe(tpacket, i, own_address, ICMP_ID + msgIt, ICMP_SEQ + msgIt);
+            mk_icmpframe(tpacket, i, own_address, target_address, ICMP_ID + msgIt, ICMP_SEQ + msgIt);
             uint8_t *buf = TracertRenderer(tpacket, 80);
-            EmitPacket(buf, 60, OutSockFd, addr);
+            EmitPacket(buf, 60, OutSockFd, target_address);
 
             free(tpacket);
             free(buf);
@@ -72,10 +73,9 @@ void worker(int32_t own_address) {
         FD_ZERO(&readfds);
         FD_SET(InSockFd, &readfds);
 
-		u_int8_t 			buffer[IP_MAXPACKET];
+		u_int8_t buffer[IP_MAXPACKET];
 		struct sockaddr_in 	sender;	
-        socklen_t 			sender_len = sizeof(sender);
-
+        socklen_t sender_len = sizeof(sender);
         vector <pair <uint32_t, int64_t> > ICMPresponses;
 
         while(true) {
@@ -97,13 +97,10 @@ void worker(int32_t own_address) {
                     exit(1);
                 }
 
-                //==============================================
-        		socklen_t 			sender_len = sizeof(sender);
-
                 struct ip* 			ip_header = (struct ip*) buffer;
                 ssize_t				ip_header_len = 4 * ip_header->ip_hl;
 
-                char *ICMPbuf = buffer + ip_header_len;
+                char *ICMPbuf = (char *)buffer + ip_header_len;
                 uint16_t packet_id = ((uint8_t)ICMPbuf[32]) * 256 + (uint8_t)ICMPbuf[33];
                 uint16_t packet_seq = ((uint8_t)ICMPbuf[34]) * 256 + (uint8_t)ICMPbuf[35];
                 uint16_t alt_packet_id = ((uint8_t)ICMPbuf[4]) * 256 + (uint8_t)ICMPbuf[5];
@@ -138,7 +135,7 @@ void worker(int32_t own_address) {
                 printf("*\n");
             } else {
                 RenderHexIp(ICMPresponses[0].first);
-                printf(" %d.%dms\n", timesum/3000, timesum%3000);
+                printf(" %ld.%ldms\n", timesum/3000, timesum%3000);
             }
            }
         else {
@@ -156,7 +153,7 @@ void worker(int32_t own_address) {
             if(tadr[1] != tadr[2] && tadr[2] != 0) {RenderHexIp(tadr[2]); printf("    ");}
             
             if(tadr[0] != 0 && tadr[1] != 0 && tadr[2] != 0)
-                printf(" %d.%dms\n", timesum/3000, timesum%3000);
+                printf(" %ld.%ldms\n", timesum/3000, timesum%3000);
             else
                 printf("???\n");
         }
@@ -166,48 +163,28 @@ void worker(int32_t own_address) {
     }
 }
 
-
-/*
- * mniej więcej ukradnięte z manpages.
- * https://man7.org/linux/man-pages/man3/getifaddrs.3.html
- * to prawdopodobnie nie jest najlepsze rozwiązanie. Można byłoby poprosić
- * kernel żeby wygenerował nam jakieś używalne IP - chociażby pingując 1.1.1.1
- * i czytając zwrócony pakiet ICMP. Ale to jest wystarczająco dobre, na pewno lepsze
- * niż używanie
- *  - wpisanego na chama do structa 192.168.x.x 
- *  - używania niesurowego gniazda ICMP.
- */
-void get_ipvaddrs(vector<char *> *out) {
-    struct ifaddrs *ifaddr;
-    int family, s;
-
-    if (getifaddrs(&ifaddr) == -1) {
-        perror("getifaddrs");
-        exit(EXIT_FAILURE);
-    }
-    
-    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == NULL)
-            continue;
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            char *host = (char *)malloc(sizeof(char) * NI_MAXHOST);
-            s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
-            out->push_back(host);
-        }
-    }
-
-    freeifaddrs(ifaddr);
-}
-
-int main() {
+int main(int argc, char *argv[]) {
     srand(time(NULL));
 
     vector <char *> ip_addresses;
     vector <int32_t> vaddrs;
 
+    if (argc != 2) {
+        printf("[critical] wrong parameters\n");
+        printf("please use ./main 91.198.174.194\n");
+        printf("or ./main www.wikipedia.net");
+        exit(1);
+    }
+
+    sockaddr_in addr = GetRecipient(argv[1]);
+    printf("resolved target to ");
+    uint32_t target_ipv4 = addr.sin_addr.s_addr;
+    RenderHexIp(target_ipv4);
+    printf("\n");
+
     get_ipvaddrs(&ip_addresses);
     
-    for(int i= 0; i < ip_addresses.size(); i++) {
+    for(size_t i = 0; i < ip_addresses.size(); i++) {
         struct in_addr addr;        
         inet_aton(ip_addresses[i], &addr);
 
@@ -230,18 +207,18 @@ int main() {
         printf("\nIpv4 addresses on your machine are:\n");
         vector <char *> fbackip_addresses;
         get_ipvaddrs(&fbackip_addresses);
-        for(int i= 0; i < fbackip_addresses.size(); i++)
+        for(size_t i = 0; i < fbackip_addresses.size(); i++)
             printf("%s\n", fbackip_addresses[i]);
         exit(1);
     } else if(vaddrs.size() > 1) {
         printf("[info] there are more than one addresses that seem to be valid\n");
-        printf("rolling with %s then\n", vaddrs[0]);
+        printf("rolling with %X then\n", vaddrs[0]);
         faddr = vaddrs[0];
     } else {
         faddr = vaddrs[0];
     }
 
-    worker(__bswap_32(faddr));
+    worker(__bswap_32(faddr), target_ipv4);
 
     return 0;
 }

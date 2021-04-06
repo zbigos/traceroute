@@ -1,3 +1,5 @@
+/* Zbigniew Drozd 310555 */
+
 #include "netutils.hpp"
 #include <arpa/inet.h>
 #include <byteswap.h>
@@ -8,12 +10,30 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h> 
+#include <algorithm>
+#include <arpa/inet.h>
+#include <chrono>
+#include <ctime>
+#include <ifaddrs.h>
+#include <linux/if_link.h>
+#include <netdb.h>
+#include <random>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 
 uint16_t calculate_icmp_checksum(uint8_t *buf, size_t bytecount) {
     uint32_t acc = 0;
 
     // This technically will fail for odd bytecounts.
-    for(int i = 0; i <= bytecount/2; i++) {
+    for(size_t i = 0; i <= bytecount/2; i++) {
         acc += __bswap_16(((uint16_t *)buf)[i]);
     }
 
@@ -47,10 +67,7 @@ uint8_t *TracertRenderer(TracertPacket *src, int payloadsize) {
     *(int32_t *)(&packet[12]) = __bswap_32(src->SourceIP);
     
     /******** offset 128 ********/
-    packet[16] = 91;
-    packet[17] = 198;
-    packet[18] = 174;
-    packet[19] = 194;
+    *(int32_t *)(&packet[16]) = __bswap_32(src->DestIP);
 
 
     /******** HEADER ICMP ********/
@@ -106,8 +123,6 @@ void DebugTracertRenderer(uint8_t *buf, int packetsize) {
     printf("Source = %d.%d.%d.%d\n", buf[12], buf[13], buf[14], buf[15]);
     printf("Source = %02X %02X %02X %02X\n", buf[16], buf[17], buf[18], buf[19]);
     printf("Source = %d.%d.%d.%d\n", buf[16], buf[17], buf[18], buf[19]);
-    printf("---- derived ICMP packet info ----\n");
-    printf("\n");
 }
 
 int GetSocket(int proto) {
@@ -140,7 +155,7 @@ sockaddr_in GetRecipient(char *hosthint) {
     struct addrinfo *result;
     memset(&hints, 0, sizeof(hints));
     
-    struct addrinfo *addrptr = result;
+    struct addrinfo *addrptr;
     hints.ai_family = AF_INET;    /* Allow IPv4 or IPv6 */
     hints.ai_socktype = SOCK_DGRAM;
     hints.ai_flags = AI_PASSIVE;    /* For wildcard IP address */
@@ -160,11 +175,7 @@ sockaddr_in GetRecipient(char *hosthint) {
         return t;
     } else {
         for(addrptr = result; addrptr != NULL; addrptr = addrptr->ai_next) {
-            //std::cout << addrptr->ai_family << " " << addrptr->ai_protocol << " " << addrptr->ai_addrlen << std::endl;
             if (addrptr->ai_family == 2) {
-                //printf("%X\n", addrptr->ai_addr->sa_data);
-                //printf("%X\n", char2uint(addrptr->ai_addr->sa_data));
-                //RenderHexIp(char2uint(addrptr->ai_addr->sa_data));
                 sockaddr_in tmp;
                 tmp.sin_addr.s_addr = char2uint(addrptr->ai_addr->sa_data);
                 freeaddrinfo(result);
@@ -173,12 +184,17 @@ sockaddr_in GetRecipient(char *hosthint) {
             
         }
     }
+
+    sockaddr_in t;
+    memset(&t, 0, sizeof(t));
+    freeaddrinfo(result);
+    return t;
 }
 
-void EmitPacket(uint8_t *buf, uint16_t bufsize, int sockfd, sockaddr_in recipient) {
+void EmitPacket(uint8_t *buf, uint16_t bufsize, int sockfd, uint32_t their_ip) {
     sockaddr_in servaddr;
     servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = recipient.sin_addr.s_addr;
+    servaddr.sin_addr.s_addr = their_ip;
     servaddr.sin_port = htons(35000);
 
     int wc = 0;
@@ -187,9 +203,11 @@ void EmitPacket(uint8_t *buf, uint16_t bufsize, int sockfd, sockaddr_in recipien
         printf("write status %s %d\n", std::strerror(errno), errno);
         exit(1);
     }
+     
+    return;
 }
 
-void mk_icmpframe(TracertPacket *tpacket, int TTL, int32_t own_ip, uint16_t ICMP_ID, uint16_t ICMP_SEQ) {
+void mk_icmpframe(TracertPacket *tpacket, int TTL, uint32_t own_ip, uint32_t their_ip, uint16_t ICMP_ID, uint16_t ICMP_SEQ) {
     tpacket->Version = 4;
     tpacket->IHL = 5;
     tpacket->DCSP = 0;
@@ -204,11 +222,45 @@ void mk_icmpframe(TracertPacket *tpacket, int TTL, int32_t own_ip, uint16_t ICMP
     tpacket->Protocol=1;
 
     tpacket->SourceIP=own_ip;
-    tpacket->DestIP=0xdead; 
+    tpacket->DestIP=their_ip; 
 
     tpacket->Type = 8; //echo (request)
     tpacket->Code = 0;
 
     tpacket->ICMPIdentifier = ICMP_ID;
     tpacket->ICMPSequenceNumber = ICMP_SEQ;
+
+    return;
+}
+
+/*
+ * mniej więcej ukradnięte z manpages.
+ * https://man7.org/linux/man-pages/man3/getifaddrs.3.html
+ * to prawdopodobnie nie jest najlepsze rozwiązanie. Można byłoby poprosić
+ * kernel żeby wygenerował nam jakieś używalne IP - chociażby pingując 1.1.1.1
+ * i czytając zwrócony pakiet ICMP. Ale to jest wystarczająco dobre, na pewno lepsze
+ * niż używanie
+ *  - wpisanego na chama do structa 192.168.x.x 
+ *  - używania niesurowego gniazda ICMP.
+ */
+void get_ipvaddrs(std::vector<char *> *out) {
+    struct ifaddrs *ifaddr;
+    int s;
+
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
+        exit(EXIT_FAILURE);
+    }
+    
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL)
+            continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            char *host = (char *)malloc(sizeof(char) * NI_MAXHOST);
+            s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+            out->push_back(host);
+        }
+    }
+
+    freeifaddrs(ifaddr);
 }

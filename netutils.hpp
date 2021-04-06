@@ -1,3 +1,5 @@
+/* Zbigniew Drozd 310555 */
+
 #include "inttypes.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -5,6 +7,7 @@
 #include <iostream>
 #include <netdb.h>
 #include <cstring>
+#include <vector>
 
 struct TracertPacket {
     // IPv4
@@ -39,7 +42,8 @@ struct TracertPacket {
 sockaddr_in GetRecipient(char *hosthint);
 void RenderHexIp(uint64_t ip);
 int GetSocket(int proto);
-void EmitPacket(uint8_t *buf, uint16_t bufsize, int sockfd, sockaddr_in recipient);
+void EmitPacket(uint8_t *buf, uint16_t bufsize, int sockfd, uint32_t their_ip);
 uint8_t *TracertRenderer(TracertPacket *src, int payloadsize);
 void DebugTracertRenderer(uint8_t *buf, int packetsize);
-void mk_icmpframe(TracertPacket *tpacket, int TTL, int32_t own_ip, uint16_t ICMP_ID, uint16_t ICMP_SEQ);
+void mk_icmpframe(TracertPacket *tpacket, int TTL, uint32_t own_ip, uint32_t their_ip, uint16_t ICMP_ID, uint16_t ICMP_SEQ);
+void get_ipvaddrs(std::vector<char *> *out);
